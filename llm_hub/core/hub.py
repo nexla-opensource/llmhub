@@ -19,9 +19,9 @@ from ..core.types import (
 )
 from ..core.exceptions import ConfigurationError, LLMHubError
 from ..providers.base import BaseProvider
-from ..middleware.tracing import TracingMiddleware
-from ..middleware.cost_tracking import CostTrackingMiddleware
-from ..middleware.retry import RetryMiddleware
+from ..core.middleware.tracing import TracingMiddleware
+from ..core.middleware.cost_tracking import CostTrackingMiddleware
+from ..core.middleware.retry import RetryMiddleware
 
 
 class LLMHub:
@@ -100,10 +100,22 @@ class LLMHub:
         """
         try:
             # Dynamically import the provider module
-            provider_module = importlib.import_module(f"..providers.{config.provider.value.lower()}", package=__name__)
+            provider_module = importlib.import_module(f"llm_hub.providers.{config.provider.value.lower()}")
             
-            # Get the provider class (convention: provider name + "Provider")
-            provider_class_name = f"{config.provider.value.capitalize()}Provider"
+            # Special case handling for provider names
+            provider_class_mapping = {
+                "openai": "OpenAIProvider",
+                "anthropic": "AnthropicProvider",
+                "gemini": "GeminiProvider"
+                # Add any other providers with special naming conventions here
+            }
+            
+            # Get the provider class name based on the mapping or fall back to the default convention
+            provider_class_name = provider_class_mapping.get(
+                config.provider.value.lower(),
+                f"{config.provider.value.capitalize()}Provider"
+            )
+            
             provider_class = getattr(provider_module, provider_class_name)
             
             # Initialize the provider with the API key and options

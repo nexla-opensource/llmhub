@@ -9,10 +9,8 @@ import mimetypes
 import os
 from typing import Any, Dict, List, Optional, Union, AsyncGenerator, Iterator
 
-import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
-from google.generativeai.types.generation_types import GenerationConfig
-from google.ai.generativelanguage_v1 import FunctionDeclaration, Tool, Part
+from google import genai
+from google.genai.types import HttpOptions
 
 from ..core.exceptions import (
     AuthenticationError,
@@ -98,8 +96,11 @@ class GeminiProvider(BaseProvider):
         # Set default model if not provided
         self.model = model or self.DEFAULT_MODEL
         
-        # Initialize the Gemini client
-        genai.configure(api_key=api_key)
+        # Initialize the Gemini client with the new SDK approach
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=HttpOptions(api_version="v1")
+        )
         
         # Store additional parameters
         self.generation_config = kwargs.get("generation_config", {})
@@ -112,47 +113,6 @@ class GeminiProvider(BaseProvider):
     def supports_feature(self, feature: str) -> bool:
         return self.SUPPORTED_FEATURES.get(feature, False)
     
-    def _create_gemini_model(self):
-        """
-        Create a Gemini model instance
-        
-        Returns:
-            Gemini model object
-        """
-        return genai.GenerativeModel(
-            model_name=self.model,
-            generation_config=self._get_generation_config(),
-            safety_settings=self._get_safety_settings()
-        )
-    
-    def _get_generation_config(self) -> GenerationConfig:
-        """
-        Get the generation configuration for Gemini
-        
-        Returns:
-            Gemini GenerationConfig object
-        """
-        # Start with default config
-        config = {}
-        
-        # Add parameters from initialization
-        config.update(self.generation_config)
-        
-        return GenerationConfig(**config)
-    
-    def _get_safety_settings(self) -> Optional[List[Dict[str, Any]]]:
-        """
-        Get safety settings for Gemini
-        
-        Returns:
-            List of safety settings or None for defaults
-        """
-        if self.safety_settings is not None:
-            return self.safety_settings
-        
-        # Use default safety settings
-        return None
-    
     def _convert_messages(self, instructions: Optional[str], messages: List[Message]) -> List[Dict[str, Any]]:
         """
         Convert LLMHub messages to Gemini format
@@ -164,11 +124,11 @@ class GeminiProvider(BaseProvider):
         Returns:
             List of Gemini-formatted messages
         """
-        gemini_messages = []
+        contents = []
         
         # Add system message if instructions provided
         if instructions:
-            gemini_messages.append({
+            contents.append({
                 "role": "system",
                 "parts": [{"text": instructions}]
             })
@@ -269,9 +229,9 @@ class GeminiProvider(BaseProvider):
                         # Not directly supported by Gemini API yet
                         raise LLMHubError("Audio file content not yet supported by Gemini API")
             
-            gemini_messages.append(gemini_message)
+            contents.append(gemini_message)
         
-        return gemini_messages
+        return contents
     
     def _convert_role(self, role: Role) -> str:
         """
@@ -650,71 +610,65 @@ class GeminiProvider(BaseProvider):
             Either a complete response or a streaming response iterator
         """
         try:
-            # Create the model
-            model = self._create_gemini_model()
-            
             # Convert messages to Gemini format
             gemini_messages = self._convert_messages(instructions, messages)
             
+            # Extract the content from the converted messages
+            contents = []
+            for message in gemini_messages:
+                if isinstance(message, dict) and 'parts' in message:
+                    for part in message['parts']:
+                        contents.append(part)
+                elif isinstance(message, dict) and 'role' in message and 'parts' in message:
+                    role_content = message['role']
+                    for part in message['parts']:
+                        # If it's a system message, create a special content type
+                        if role_content == 'system' and 'text' in part:
+                            contents.append({"role": "system", "text": part['text']})
+                        else:
+                            contents.append(part)
+            
             # Prepare generation config
-            generation_config = self._get_generation_config()
+            generation_config = {}
             
             # Add temperature if specified
             if "temperature" in kwargs:
-                generation_config.temperature = kwargs.pop("temperature")
+                generation_config["temperature"] = kwargs.pop("temperature")
             
             # Add top_p if specified
             if "top_p" in kwargs:
-                generation_config.top_p = kwargs.pop("top_p")
+                generation_config["top_p"] = kwargs.pop("top_p")
             
             # Add top_k if specified
             if "top_k" in kwargs:
-                generation_config.top_k = kwargs.pop("top_k")
+                generation_config["top_k"] = kwargs.pop("top_k")
             
             # Add max_output_tokens if specified
             if "max_tokens" in kwargs:
-                generation_config.max_output_tokens = kwargs.pop("max_tokens")
+                generation_config["max_output_tokens"] = kwargs.pop("max_tokens")
             
             # Add tools if provided
             gemini_tools = None
-            if tools:
+            if tools and self.model in self.FUNCTION_CALLING_MODELS:
                 gemini_tools = self._convert_tools(tools)
             
-            # Begin chat session
-            chat = model.start_chat(history=[])
-            
-            # Prepare content for the request
-            content = []
-            
-            # Get the last user message
-            last_user_message = None
-            for message in reversed(gemini_messages):
-                if message["role"] == "user":
-                    last_user_message = message
-                    break
-            
-            if last_user_message is None:
-                raise LLMHubError("No user message found in the conversation")
-            
-            # Add parts from the last user message
-            for part in last_user_message["parts"]:
-                content.append(part)
-            
-            # Make the API call
+            # Make the API call using the new client approach
             if stream:
-                response = chat.send_message(
-                    content=content,
-                    generation_config=generation_config,
+                response = self.client.models.generate_content_stream(
+                    model=self.model,
+                    contents=contents,
+                    generation_config=generation_config or None,
                     tools=gemini_tools,
-                    stream=True
+                    safety_settings=self.safety_settings
                 )
                 return self._create_streaming_response(response, self.model)
             else:
-                response = chat.send_message(
-                    content=content,
-                    generation_config=generation_config,
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    generation_config=generation_config or None,
                     tools=gemini_tools,
-                    stream=False
+                    safety_settings=self.safety_settings
                 )
                 return self._create_response(response, self.model)
             
@@ -812,8 +766,8 @@ class GeminiProvider(BaseProvider):
             List of model information dictionaries
         """
         try:
-            # Fetch available models from the API
-            models = genai.list_models()
+            # Fetch available models from the API using the new client approach
+            models = self.client.models.list_models()
             
             # Filter for Gemini models only
             gemini_models = []

@@ -9,7 +9,7 @@ import random
 import time
 from typing import Any, Callable, List, Optional, Set, Type, Union
 
-from ..core.exceptions import (
+from ...core.exceptions import (
     AuthenticationError,
     LLMHubError,
     RateLimitError,

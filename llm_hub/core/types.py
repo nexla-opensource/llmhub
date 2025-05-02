@@ -84,12 +84,12 @@ class Role(str, Enum):
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"
+    TOOL = "tool"
 
 
 class Message(BaseModel):
     role: Role
-    content: List[Union[TextContent, ImageContent, DocumentContent, AudioContent]]
-
+    content: List[Union[TextContent, ImageContent, DocumentContent, AudioContent]] | str
 
 class ToolType(str, Enum):
     FUNCTION = "function"

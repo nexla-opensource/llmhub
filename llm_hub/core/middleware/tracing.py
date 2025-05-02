@@ -2,6 +2,7 @@
 Tracing middleware for LLM Hub
 """
 
+import asyncio
 import functools
 import json
 import logging
@@ -9,7 +10,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Optional
 
-from ..core.exceptions import MiddlewareError
+from ...core.exceptions import MiddlewareError
 
 # Set up logger
 logger = logging.getLogger(__name__)

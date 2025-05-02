@@ -76,7 +76,17 @@ def parse_response_as_model(
         data = extract_json_from_text(response_text)
         
         # Then validate it against the model
-        return model_class.parse_obj(data)
+        # Try both Pydantic v1 and v2 methods for compatibility
+        try:
+            # Pydantic v2 method
+            return model_class.model_validate(data)
+        except AttributeError:
+            try:
+                # Pydantic v1 method
+                return model_class.parse_obj(data)
+            except AttributeError:
+                # Last resort: direct initialization
+                return model_class(**data)
     
     except (StructuredOutputError, ValidationError) as e:
         raise StructuredOutputError(
@@ -119,8 +129,13 @@ def create_json_schema(model_class: Type[BaseModel]) -> Dict[str, Any]:
     Returns:
         JSON schema dictionary
     """
-    # Get the JSON schema
-    schema = model_class.schema()
+    # Get the JSON schema using Pydantic v2 or v1 method
+    try:
+        # Pydantic v2 method
+        schema = model_class.model_json_schema()
+    except AttributeError:
+        # Pydantic v1 method (fallback)
+        schema = model_class.schema()
     
     # Remove Pydantic-specific fields
     schema.pop("title", None)
@@ -206,7 +221,13 @@ def convert_pydantic_to_json_schema(model_class: Type[BaseModel]) -> Dict[str, A
     Returns:
         JSON schema dictionary formatted for function calling
     """
-    schema = model_class.schema()
+    # Get schema using either v1 or v2 API
+    try:
+        # Pydantic v2 method
+        schema = model_class.model_json_schema()
+    except AttributeError:
+        # Pydantic v1 method (fallback)
+        schema = model_class.schema()
     
     # Format for function calling
     result = {

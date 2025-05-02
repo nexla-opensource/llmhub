@@ -157,57 +157,116 @@ class OpenAIProvider(BaseProvider):
             })
         
         # Convert LLMHub messages to OpenAI format
-        for message in messages:
+        for i, message in enumerate(messages):
             # Start with basic message structure
             openai_message = {
                 "role": message.role.value,
             }
             
+            # Handle tool messages - must be linked to a preceding message with tool_calls
+            if message.role == Role.TOOL:
+                # Make sure there's a tool_call_id
+                if not hasattr(message, "tool_call_id") or not message.tool_call_id:
+                    # Skip invalid tool messages that don't have tool_call_id
+                    continue
+                
+                # The tool message must reference a valid tool call from a previous assistant message
+                valid_tool_call = False
+                for prev_message in openai_messages:
+                    if prev_message["role"] == "assistant" and "tool_calls" in prev_message:
+                        for tool_call in prev_message.get("tool_calls", []):
+                            if tool_call.get("id") == message.tool_call_id:
+                                valid_tool_call = True
+                                break
+                    if valid_tool_call:
+                        break
+                
+                if not valid_tool_call:
+                    # Skip tool messages that don't reference a valid tool call
+                    continue
+                
+                openai_message["tool_call_id"] = message.tool_call_id
+                openai_message["content"] = message.content
+                openai_messages.append(openai_message)
+                continue
+                
+            # Handle assistant messages with tool calls
+            if message.role == Role.ASSISTANT and hasattr(message, "tool_calls") and message.tool_calls:
+                tool_calls_list = []
+                for tool_call in message.tool_calls:
+                    tool_calls_list.append({
+                        "id": tool_call.id,
+                        "type": tool_call.type.value,
+                        "function": {
+                            "name": tool_call.function.name,
+                            "arguments": tool_call.function.arguments
+                        }
+                    })
+                
+                if tool_calls_list:
+                    openai_message["tool_calls"] = tool_calls_list
+                
+                # Content might be None or empty for tool call messages
+                if message.content is None or message.content == "":
+                    openai_message["content"] = None
+                    openai_messages.append(openai_message)
+                    continue
+            
             # Handle message content
             content_items = []
             
-            for content_item in message.content:
-                if content_item.type == ContentType.TEXT:
-                    # Text content
-                    content_items.append({
-                        "type": "text",
-                        "text": content_item.text
-                    })
-                
-                elif content_item.type == ContentType.IMAGE:
-                    # Image content
-                    image_data = None
+            # If content is a string, convert to a single text item
+            if isinstance(message.content, str):
+                content_items.append({
+                    "type": "text",
+                    "text": message.content
+                })
+            # If content is None, leave as is
+            elif message.content is None:
+                openai_message["content"] = None
+                openai_messages.append(openai_message)
+                continue
+            # Otherwise, process the list of content items
+            else:
+                for content_item in message.content:
+                    if content_item.type == ContentType.TEXT:
+                        # Text content
+                        content_items.append({
+                            "type": "text",
+                            "text": content_item.text
+                        })
                     
-                    # Use URL if provided
-                    if hasattr(content_item, "image_url") and content_item.image_url:
-                        image_data = {
-                            "url": str(content_item.image_url),
-                        }
-                    
-                    # Use file path if provided
-                    elif hasattr(content_item, "image_path") and content_item.image_path:
-                        # Read image file and convert to base64
-                        try:
-                            with open(content_item.image_path, "rb") as f:
-                                image_bytes = f.read()
-                                base64_image = base64.b64encode(image_bytes).decode("utf-8")
-                                image_data = {
-                                    "url": f"data:image/png;base64,{base64_image}",
-                                }
-                        except Exception as e:
-                            raise LLMHubError(f"Failed to read image file: {str(e)}")
-                    
-                    # Set image detail if specified
-                    if hasattr(content_item, "detail") and content_item.detail:
-                        image_data["detail"] = content_item.detail
-                    
-                    content_items.append({
-                        "type": "image_url",
-                        "image_url": image_data
-                    })
-                
-                # Document content not supported natively by OpenAI API
-                # It would be handled via file upload APIs separately
+                    elif content_item.type == ContentType.IMAGE:
+                        # Image content
+                        image_data = None
+                        
+                        # Use URL if provided
+                        if hasattr(content_item, "image_url") and content_item.image_url:
+                            image_data = {
+                                "url": str(content_item.image_url),
+                            }
+                        
+                        # Use file path if provided
+                        elif hasattr(content_item, "image_path") and content_item.image_path:
+                            # Read image file and convert to base64
+                            try:
+                                with open(content_item.image_path, "rb") as f:
+                                    image_bytes = f.read()
+                                    base64_image = base64.b64encode(image_bytes).decode("utf-8")
+                                    image_data = {
+                                        "url": f"data:image/png;base64,{base64_image}",
+                                    }
+                            except Exception as e:
+                                raise LLMHubError(f"Failed to read image file: {str(e)}")
+                        
+                        # Set image detail if specified
+                        if hasattr(content_item, "detail") and content_item.detail:
+                            image_data["detail"] = content_item.detail
+                        
+                        content_items.append({
+                            "type": "image_url",
+                            "image_url": image_data
+                        })
             
             # Set appropriate message content format
             if len(content_items) == 1 and content_items[0]["type"] == "text":
@@ -688,8 +747,10 @@ class OpenAIProvider(BaseProvider):
         
         # Check for vision capabilities if images are present
         has_images = any(
-            any(content.type == ContentType.IMAGE for content in message.content)
+            any(isinstance(content, dict) and content.get("type") == ContentType.IMAGE
+                for content in (message.content if isinstance(message.content, list) else []))
             for message in request.messages
+            if hasattr(message, "content") and message.content is not None
         )
         
         if has_images and model not in self.VISION_MODELS:
@@ -711,3 +772,28 @@ class OpenAIProvider(BaseProvider):
                 f"Model '{model}' does not support explicit reasoning configuration",
                 provider=self.provider_name
             )
+            
+        # Validate JSON response format requirements
+        if request.output_format and request.output_format.type == "json_object":
+            has_json_mention = False
+            for message in request.messages:
+                if not hasattr(message, "content") or message.content is None:
+                    continue
+                    
+                if isinstance(message.content, str) and "json" in message.content.lower():
+                    has_json_mention = True
+                    break
+                    
+                if isinstance(message.content, list):
+                    for content in message.content:
+                        if hasattr(content, "text") and content.text and "json" in content.text.lower():
+                            has_json_mention = True
+                            break
+                    if has_json_mention:
+                        break
+            
+            if not has_json_mention:
+                raise LLMHubError(
+                    "When using JSON response format, one of the messages must contain the word 'json'",
+                    provider=self.provider_name
+                )
