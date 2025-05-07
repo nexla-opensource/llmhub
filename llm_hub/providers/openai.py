@@ -34,6 +34,7 @@ from ..core.types import (
     UsageInfo,
     CostInfo,
     ResponseFormat,
+    ResponseFormatType,
     ReasoningConfig,
     Role,
 )
@@ -44,6 +45,7 @@ class OpenAIProvider(BaseProvider):
     """
     Provider implementation for OpenAI
     """
+    DEFAULT_MODEL = "gpt-4o"
     
     # Feature support flags
     SUPPORTED_FEATURES = {
@@ -51,13 +53,14 @@ class OpenAIProvider(BaseProvider):
         "vision": True,
         "streaming": True,
         "structured_output": True,
+        "json_schema": True,
         "file_upload": True,
-        "reasoning": False,  # OpenAI doesn't have an explicit reasoning parameter
+        "reasoning": True,
+        "prompt_caching": True,
     }
     
     # Default models
-    DEFAULT_MODEL = "gpt-4o"
-    VISION_MODELS = ["gpt-4-vision-preview", "gpt-4o", "gpt-4o-2024-05-13"]
+    VISION_MODELS = ["gpt-4-vision-preview", "gpt-4o", "gpt-4o-2024-05-13", "gpt-4.1", "gpt-4.1-mini"]
     
     # Models that support function calling
     FUNCTION_CALLING_MODELS = [
@@ -67,6 +70,18 @@ class OpenAIProvider(BaseProvider):
         "gpt-4-turbo-preview",
         "gpt-4o",
         "gpt-4o-2024-05-13",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+    ]
+    
+    # Models that support structured output with JSON schema
+    STRUCTURED_OUTPUT_MODELS = [
+        "gpt-4o",
+        "gpt-4o-2024-05-13",
+        "gpt-4o-mini",
+        "gpt-4o-mini-2024-07-18",
+        "gpt-4.1",
+        "gpt-4.1-mini"
     ]
     
     # Token pricing (per 1K tokens as of May 2023)
@@ -84,6 +99,8 @@ class OpenAIProvider(BaseProvider):
         "gpt-4o": (0.01, 0.03),
         "gpt-4o-2024-05-13": (0.01, 0.03),
         "gpt-4-vision-preview": (0.01, 0.03),
+        "gpt-4.1": (0.01, 0.03),
+        "gpt-4.1-mini": (0.005, 0.015),
     }
     
     def __init__(
@@ -136,115 +153,86 @@ class OpenAIProvider(BaseProvider):
     def supports_feature(self, feature: str) -> bool:
         return self.SUPPORTED_FEATURES.get(feature, False)
     
-    def _convert_messages(self, instructions: Optional[str], messages: List[Message]) -> List[Dict[str, Any]]:
+    def _convert_messages_to_api_format(self, instructions: Optional[str], messages: List[Message]) -> List[Dict[str, Any]]:
         """
-        Convert LLMHub messages to OpenAI format
+        Convert LLMHub messages to OpenAI API format
         
         Args:
             instructions: System instructions
             messages: LLMHub messages
             
         Returns:
-            List of OpenAI-formatted messages
+            List of OpenAI API-formatted messages
         """
-        openai_messages = []
+        api_messages = []
         
         # Add system message if instructions provided
         if instructions:
-            openai_messages.append({
+            api_messages.append({
                 "role": "system",
-                "content": instructions
+                "content": [{"type": "input_text", "text": instructions}]
             })
         
-        # Convert LLMHub messages to OpenAI format
-        for i, message in enumerate(messages):
+        # Convert LLMHub messages to API format
+        for message in messages:
             # Start with basic message structure
-            openai_message = {
+            api_message = {
                 "role": message.role.value,
+                "content": []
             }
             
-            # Handle tool messages - must be linked to a preceding message with tool_calls
+            # Handle tool messages separately
             if message.role == Role.TOOL:
-                # Make sure there's a tool_call_id
-                if not hasattr(message, "tool_call_id") or not message.tool_call_id:
-                    # Skip invalid tool messages that don't have tool_call_id
-                    continue
-                
-                # The tool message must reference a valid tool call from a previous assistant message
-                valid_tool_call = False
-                for prev_message in openai_messages:
-                    if prev_message["role"] == "assistant" and "tool_calls" in prev_message:
-                        for tool_call in prev_message.get("tool_calls", []):
-                            if tool_call.get("id") == message.tool_call_id:
-                                valid_tool_call = True
-                                break
-                    if valid_tool_call:
-                        break
-                
-                if not valid_tool_call:
-                    # Skip tool messages that don't reference a valid tool call
-                    continue
-                
-                openai_message["tool_call_id"] = message.tool_call_id
-                openai_message["content"] = message.content
-                openai_messages.append(openai_message)
+                if hasattr(message, "tool_call_id") and message.tool_call_id:
+                    # Handle tool message with result format
+                    api_message["type"] = "function_call_output"
+                    api_message["call_id"] = message.tool_call_id
+                    api_message["output"] = message.content
+                    api_messages.append(api_message)
                 continue
-                
+            
             # Handle assistant messages with tool calls
             if message.role == Role.ASSISTANT and hasattr(message, "tool_calls") and message.tool_calls:
-                tool_calls_list = []
+                # Add each tool call to API message list
                 for tool_call in message.tool_calls:
-                    tool_calls_list.append({
-                        "id": tool_call.id,
-                        "type": tool_call.type.value,
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments
-                        }
+                    api_messages.append({
+                        "type": "function_call",
+                        "call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "arguments": json.dumps(tool_call.function.arguments)
                     })
                 
-                if tool_calls_list:
-                    openai_message["tool_calls"] = tool_calls_list
-                
-                # Content might be None or empty for tool call messages
+                # If there's no text content, continue to next message
                 if message.content is None or message.content == "":
-                    openai_message["content"] = None
-                    openai_messages.append(openai_message)
                     continue
             
-            # Handle message content
-            content_items = []
-            
-            # If content is a string, convert to a single text item
+            # Prepare content items
             if isinstance(message.content, str):
-                content_items.append({
-                    "type": "text",
+                # String content
+                api_message["content"].append({
+                    "type": "input_text", 
                     "text": message.content
                 })
-            # If content is None, leave as is
             elif message.content is None:
-                openai_message["content"] = None
-                openai_messages.append(openai_message)
+                # Skip messages with no content
                 continue
-            # Otherwise, process the list of content items
             else:
+                # Process content items list
                 for content_item in message.content:
                     if content_item.type == ContentType.TEXT:
                         # Text content
-                        content_items.append({
-                            "type": "text",
+                        api_message["content"].append({
+                            "type": "input_text",
                             "text": content_item.text
                         })
                     
                     elif content_item.type == ContentType.IMAGE:
                         # Image content
-                        image_data = None
+                        image_data = {}
                         
                         # Use URL if provided
                         if hasattr(content_item, "image_url") and content_item.image_url:
-                            image_data = {
-                                "url": str(content_item.image_url),
-                            }
+                            image_data["image_url"] = str(content_item.image_url)
                         
                         # Use file path if provided
                         elif hasattr(content_item, "image_path") and content_item.image_path:
@@ -253,9 +241,7 @@ class OpenAIProvider(BaseProvider):
                                 with open(content_item.image_path, "rb") as f:
                                     image_bytes = f.read()
                                     base64_image = base64.b64encode(image_bytes).decode("utf-8")
-                                    image_data = {
-                                        "url": f"data:image/png;base64,{base64_image}",
-                                    }
+                                    image_data["image_url"] = f"data:image/jpeg;base64,{base64_image}"
                             except Exception as e:
                                 raise LLMHubError(f"Failed to read image file: {str(e)}")
                         
@@ -263,35 +249,37 @@ class OpenAIProvider(BaseProvider):
                         if hasattr(content_item, "detail") and content_item.detail:
                             image_data["detail"] = content_item.detail
                         
-                        content_items.append({
-                            "type": "image_url",
-                            "image_url": image_data
+                        api_message["content"].append({
+                            "type": "input_image",
+                            **image_data
                         })
+                    
+                    elif content_item.type == ContentType.FILE:
+                        # File content (e.g., PDF)
+                        if hasattr(content_item, "file_path") and content_item.file_path:
+                            api_message["content"].append({
+                                "type": "input_file",
+                                "file_path": content_item.file_path
+                            })
             
-            # Set appropriate message content format
-            if len(content_items) == 1 and content_items[0]["type"] == "text":
-                # Use string content for text-only messages
-                openai_message["content"] = content_items[0]["text"]
-            else:
-                # Use array content for multi-modal messages
-                openai_message["content"] = content_items
-            
-            openai_messages.append(openai_message)
+            # Add message to input list if it has content
+            if api_message["content"]:
+                api_messages.append(api_message)
         
-        return openai_messages
+        return api_messages
     
-    def _convert_tools(self, tools: Optional[List[Tool]]) -> List[Dict[str, Any]]:
+    def _convert_tools_to_api_format(self, tools: Optional[List[Tool]]) -> Optional[List[Dict[str, Any]]]:
         """
-        Convert LLMHub tools to OpenAI format
+        Convert LLMHub tools to OpenAI API format
         
         Args:
             tools: LLMHub tools
             
         Returns:
-            List of OpenAI-formatted tools
+            List of OpenAI API-formatted tools
         """
         if not tools:
-            return []
+            return None
         
         openai_tools = []
         
@@ -302,7 +290,8 @@ class OpenAIProvider(BaseProvider):
                 tool = tool.root
             
             if tool.type == "function":
-                openai_tools.append({
+                # Create standard OpenAI tool format
+                tool_def = {
                     "type": "function",
                     "function": {
                         "name": tool.function.name,
@@ -310,47 +299,62 @@ class OpenAIProvider(BaseProvider):
                         "parameters": {
                             "type": tool.function.parameters.type,
                             "properties": tool.function.parameters.properties,
-                            "required": tool.function.parameters.required or [],
                         }
                     }
-                })
+                }
+                
+                # Add required fields if present
+                if tool.function.parameters.required:
+                    tool_def["function"]["parameters"]["required"] = tool.function.parameters.required
+                
+                # Add strict mode and additionalProperties: false for better schema enforcement
+                if "additionalProperties" not in tool_def["function"]["parameters"]:
+                    tool_def["function"]["parameters"]["additionalProperties"] = False
+                
+                # Add strict mode unless explicitly set to false in the parameters
+                tool_def["strict"] = True
+                
+                openai_tools.append(tool_def)
         
         return openai_tools
     
-    def _convert_tool_calls(self, tool_calls: List[Any]) -> List[ToolCall]:
+    def _extract_tool_calls_from_response(self, response_items):
         """
-        Convert OpenAI tool calls to LLMHub format
+        Extract tool calls from OpenAI API response
         
         Args:
-            tool_calls: OpenAI tool calls
+            response_items: Response items from OpenAI API
             
         Returns:
             List of LLMHub ToolCall objects
         """
-        llm_hub_tool_calls = []
+        tool_calls = []
         
-        for call in tool_calls:
-            try:
-                arguments = json.loads(call.function.arguments)
-            except json.JSONDecodeError:
-                arguments = {"raw_arguments": call.function.arguments}
-            
-            llm_hub_tool_calls.append(
-                ToolCall(
-                    id=call.id,
-                    type="function",
-                    function={
-                        "name": call.function.name,
-                        "arguments": arguments
-                    }
+        for item in response_items:
+            if item.get("type") == "function_call":
+                # Parse arguments
+                try:
+                    args = json.loads(item["arguments"])
+                except (json.JSONDecodeError, KeyError):
+                    args = {"raw_arguments": item.get("arguments", "")}
+                
+                # Create tool call
+                tool_calls.append(
+                    ToolCall(
+                        id=item.get("id", "") or item.get("call_id", ""),
+                        type="function",
+                        function={
+                            "name": item.get("name", ""),
+                            "arguments": args
+                        }
+                    )
                 )
-            )
         
-        return llm_hub_tool_calls
+        return tool_calls
     
-    def _create_response(self, openai_response, stream=False) -> Union[GenerateResponse, Iterator[StreamingResponse]]:
+    def _create_response_from_api(self, openai_response, stream=False) -> GenerateResponse:
         """
-        Convert OpenAI response to LLMHub format
+        Convert OpenAI API response to LLMHub format
         
         Args:
             openai_response: Response from OpenAI API
@@ -359,36 +363,39 @@ class OpenAIProvider(BaseProvider):
         Returns:
             LLMHub response object
         """
-        if stream:
-            return self._create_streaming_response(openai_response)
-        
-        # Extract useful response data
-        message = openai_response.choices[0].message
-        usage = openai_response.usage
+        # Extract text content if present
+        content = ""
+        if hasattr(openai_response, "output_text") and openai_response.output_text:
+            content = openai_response.output_text
         
         # Create response message
         response_message = ResponseMessage(
             role=Role.ASSISTANT,
-            content=message.content or ""
+            content=content
         )
         
         # Add tool calls if present
-        if hasattr(message, "tool_calls") and message.tool_calls:
-            response_message.tool_calls = self._convert_tool_calls(message.tool_calls)
+        if hasattr(openai_response, "output") and openai_response.output:
+            tool_calls = self._extract_tool_calls_from_response(openai_response.output)
+            if tool_calls:
+                response_message.tool_calls = tool_calls
         
-        # Create usage info
+        # Create metadata - usage info if available, otherwise use placeholders
         usage_info = UsageInfo(
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            total_tokens=usage.total_tokens
+            prompt_tokens=getattr(openai_response, "usage_prompt_tokens", 0),
+            completion_tokens=getattr(openai_response, "usage_completion_tokens", 0),
+            total_tokens=getattr(openai_response, "usage_total_tokens", 0)
         )
         
-        # Calculate cost
-        cost_info = CostInfo(**self.calculate_cost(
-            prompt_tokens=usage.prompt_tokens,
-            completion_tokens=usage.completion_tokens,
-            model=openai_response.model
-        ))
+        # Calculate cost if usage information is available
+        if usage_info.total_tokens > 0:
+            cost_info = CostInfo(**self.calculate_cost(
+                prompt_tokens=usage_info.prompt_tokens,
+                completion_tokens=usage_info.completion_tokens,
+                model=openai_response.model
+            ))
+        else:
+            cost_info = CostInfo(prompt_cost=0, completion_cost=0, total_cost=0)
         
         # Create metadata
         metadata = ResponseMetadata(
@@ -396,7 +403,7 @@ class OpenAIProvider(BaseProvider):
             provider="openai",
             usage=usage_info,
             cost=cost_info,
-            request_id=openai_response.id
+            request_id=getattr(openai_response, "id", None)
         )
         
         # Create and return response
@@ -417,32 +424,102 @@ class OpenAIProvider(BaseProvider):
         """
         accumulated_text = ""
         metadata = None
+        accumulated_tool_calls = {}
         
         for chunk in response_stream:
-            delta = chunk.choices[0].delta
-            
-            # Extract content from the delta
+            # Extract content from the chunk
             content = ""
-            if hasattr(delta, "content") and delta.content:
-                content = delta.content
+            
+            # Handle different event types
+            if hasattr(chunk, "type"):
+                event_type = chunk.type
+                
+                # Handle function call events
+                if event_type == "response.output_item.added" and chunk.item.get("type") == "function_call":
+                    # New function call initialization
+                    output_index = chunk.output_index
+                    accumulated_tool_calls[output_index] = {
+                        "id": chunk.item.get("id", ""),
+                        "call_id": chunk.item.get("call_id", ""),
+                        "name": chunk.item.get("name", ""),
+                        "arguments": ""
+                    }
+                    continue
+                
+                # Handle argument deltas
+                elif event_type == "response.function_call_arguments.delta":
+                    output_index = chunk.output_index
+                    if output_index in accumulated_tool_calls:
+                        accumulated_tool_calls[output_index]["arguments"] += chunk.delta
+                    continue
+            
+            # Handle regular text content
+            if hasattr(chunk, "delta") and chunk.delta and hasattr(chunk.delta, "output_text"):
+                content = chunk.delta.output_text
                 accumulated_text += content
             
             # Create metadata on the first chunk
             if metadata is None:
                 metadata = ResponseMetadata(
-                    model=chunk.model,
-                    provider="openai",
-                    request_id=chunk.id
+                    model=getattr(chunk, "model", "unknown"),
+                    provider="openai"
                 )
             
             # Check if this is the last chunk
-            finished = chunk.choices[0].finish_reason is not None
+            finished = hasattr(chunk, "done") and chunk.done
             
             yield StreamingResponse(
                 chunk=content,
                 finished=finished,
                 metadata=metadata if finished else None
             )
+    
+    def _convert_output_format_to_api_format(self, output_format: Optional[ResponseFormat]) -> Optional[Dict[str, Any]]:
+        """
+        Convert LLMHub output format to OpenAI API format
+        
+        Args:
+            output_format: LLMHub output format specification
+            
+        Returns:
+            OpenAI API-formatted response_format
+        """
+        if output_format is None:
+            return None
+            
+        # Handle simple JSON mode (legacy support)
+        if output_format.type == ResponseFormatType.JSON_OBJECT:
+            return {"type": "json_object"}
+            
+        # Handle structured output with schema
+        elif output_format.type == ResponseFormatType.JSON_SCHEMA:
+            if not self.model in self.STRUCTURED_OUTPUT_MODELS:
+                raise ConfigurationError(
+                    f"Model {self.model} does not support structured outputs with JSON schema. "
+                    f"Use one of: {', '.join(self.STRUCTURED_OUTPUT_MODELS)}"
+                )
+                
+            # Construct the format specification for structured outputs
+            format_spec = {
+                "type": "json_schema",
+                "schema": output_format.schema,
+                "strict": output_format.strict
+            }
+            
+            # Add optional fields if provided
+            if output_format.name:
+                format_spec["name"] = output_format.name
+                
+            if output_format.description:
+                format_spec["description"] = output_format.description
+                
+            return format_spec
+            
+        # Handle other format types
+        elif output_format.type == ResponseFormatType.TEXT:
+            return {"type": "text"}
+            
+        return None
     
     def generate(
         self,
@@ -470,7 +547,7 @@ class OpenAIProvider(BaseProvider):
             output_format: Format specification for the output
             timeout: Request timeout in seconds
             stream: Whether to stream the response
-            reasoning: Configuration for model reasoning (not used for OpenAI)
+            reasoning: Configuration for model reasoning
             metadata: Additional metadata for tracing and logging
             **kwargs: Additional OpenAI-specific parameters
             
@@ -478,142 +555,65 @@ class OpenAIProvider(BaseProvider):
             Either a complete response or a streaming response iterator
         """
         try:
-            # Convert messages to OpenAI format
-            openai_messages = self._convert_messages(instructions, messages)
+            # Validate output format
+            if output_format:
+                self._validate_output_format(output_format)
             
-            # Convert tools to OpenAI format
-            openai_tools = None
-            if tools:
-                openai_tools = self._convert_tools(tools)
+            # Convert messages to API format
+            api_messages = self._convert_messages_to_api_format(instructions, messages)
             
             # Prepare the request parameters
             request_params = {
                 "model": self.model,
-                "messages": openai_messages,
+                "input": api_messages,
                 "timeout": timeout,
                 "stream": stream,
             }
             
             # Add tools if provided
-            if openai_tools:
-                request_params["tools"] = openai_tools
-                request_params["tool_choice"] = tool_choice
-                
-                # Add parallel tool calls parameter
-                if parallel_tool_calls:
-                    request_params["parallel_tool_calls"] = True
-            
-            # Add structured output format if specified
-            if output_format and output_format.type == "json_object":
-                request_params["response_format"] = {"type": "json_object"}
-            
-            # Add additional parameters
-            request_params.update(kwargs)
-            
-            # Make the API call
-            response = self.client.chat.completions.create(**request_params)
-            
-            # Convert and return the response
-            return self._create_response(response, stream)
-            
-        except OpenAIError as e:
-            # Map OpenAI errors to LLMHub exceptions
-            error_msg = str(e)
-            
-            if "authentication" in error_msg.lower() or "api key" in error_msg.lower():
-                raise AuthenticationError(error_msg, provider=self.provider_name)
-            
-            elif "rate limit" in error_msg.lower():
-                raise RateLimitError(error_msg, provider=self.provider_name)
-            
-            elif "timeout" in error_msg.lower():
-                raise TimeoutError(error_msg, provider=self.provider_name)
-            
-            elif "context length" in error_msg.lower() or "token" in error_msg.lower():
-                raise TokenLimitError(error_msg, provider=self.provider_name)
-            
-            else:
-                raise ProviderError(error_msg, provider=self.provider_name)
-        
-        except Exception as e:
-            # Handle other errors
-            raise LLMHubError(f"Unexpected error: {str(e)}", provider=self.provider_name)
-    
-    async def agenerate(
-        self,
-        instructions: Optional[str],
-        messages: List[Message],
-        tools: Optional[List[Tool]] = None,
-        tool_choice: Optional[str] = "auto",
-        parallel_tool_calls: bool = False,
-        output_format: Optional[ResponseFormat] = None,
-        timeout: Optional[int] = None,
-        stream: bool = False,
-        reasoning: Optional[ReasoningConfig] = None,
-        metadata: Optional[Dict[str, str]] = None,
-        **kwargs
-    ) -> Union[GenerateResponse, AsyncGenerator[StreamingResponse, None]]:
-        """
-        Asynchronously generate a response from OpenAI
-        
-        Args:
-            instructions: System instructions for the model
-            messages: List of messages in the conversation
-            tools: List of tools available to the model
-            tool_choice: How the model should choose tools
-            parallel_tool_calls: Whether to allow parallel tool calls
-            output_format: Format specification for the output
-            timeout: Request timeout in seconds
-            stream: Whether to stream the response
-            reasoning: Configuration for model reasoning (not used for OpenAI)
-            metadata: Additional metadata for tracing and logging
-            **kwargs: Additional OpenAI-specific parameters
-            
-        Returns:
-            Either a complete response or an async streaming response generator
-        """
-        try:
-            # Convert messages to OpenAI format
-            openai_messages = self._convert_messages(instructions, messages)
-            
-            # Convert tools to OpenAI format
-            openai_tools = None
             if tools:
-                openai_tools = self._convert_tools(tools)
-            
-            # Prepare the request parameters
-            request_params = {
-                "model": self.model,
-                "messages": openai_messages,
-                "timeout": timeout,
-                "stream": stream,
-            }
-            
-            # Add tools if provided
-            if openai_tools:
-                request_params["tools"] = openai_tools
-                request_params["tool_choice"] = tool_choice
+                request_params["tools"] = self._convert_tools_to_api_format(tools)
+                if tool_choice != "auto":
+                    request_params["tool_choice"] = tool_choice
                 
-                # Add parallel tool calls parameter
+                # Add parallel tool calls parameter if needed
                 if parallel_tool_calls:
                     request_params["parallel_tool_calls"] = True
             
             # Add structured output format if specified
-            if output_format and output_format.type == "json_object":
-                request_params["response_format"] = {"type": "json_object"}
+            if output_format:
+                response_format = self._convert_output_format_to_api_format(output_format)
+                if response_format:
+                    if "schema" in response_format and response_format["type"] == "json_schema":
+                        # Use the new format structure for text param in newer models
+                        request_params["text"] = {"format": response_format}
+                    else:
+                        # Use the older response_format param for backward compatibility
+                        request_params["response_format"] = response_format
+            
+            # Add reasoning configuration if specified
+            if reasoning:
+                request_params["reasoning"] = {}
+                
+                if hasattr(reasoning, "effort") and reasoning.effort:
+                    request_params["reasoning"]["effort"] = reasoning.effort.value
+                
+                if hasattr(reasoning, "summary") and reasoning.summary:
+                    request_params["reasoning"]["summary"] = reasoning.summary.value
+                
+                if hasattr(reasoning, "max_tokens") and reasoning.max_tokens:
+                    request_params["reasoning"]["max_tokens"] = reasoning.max_tokens
             
             # Add additional parameters
             request_params.update(kwargs)
             
             # Make the API call
-            response = await self.async_client.chat.completions.create(**request_params)
-            
-            if not stream:
-                # Convert and return the response
-                return self._create_response(response)
+            if stream:
+                response_stream = self.client.responses.streaming.create(**request_params)
+                return self._create_streaming_response(response_stream)
             else:
-                # Return the streaming response
-                return self._acreate_streaming_response(response)
+                response = self.client.responses.create(**request_params)
+                return self._create_response_from_api(response)
             
         except OpenAIError as e:
             # Map OpenAI errors to LLMHub exceptions
@@ -650,32 +650,172 @@ class OpenAIProvider(BaseProvider):
         """
         accumulated_text = ""
         metadata = None
+        accumulated_tool_calls = {}
         
         async for chunk in response_stream:
-            delta = chunk.choices[0].delta
-            
-            # Extract content from the delta
+            # Extract content from the chunk
             content = ""
-            if hasattr(delta, "content") and delta.content:
-                content = delta.content
+            
+            # Handle different event types
+            if hasattr(chunk, "type"):
+                event_type = chunk.type
+                
+                # Handle function call events
+                if event_type == "response.output_item.added" and chunk.item.get("type") == "function_call":
+                    # New function call initialization
+                    output_index = chunk.output_index
+                    accumulated_tool_calls[output_index] = {
+                        "id": chunk.item.get("id", ""),
+                        "call_id": chunk.item.get("call_id", ""),
+                        "name": chunk.item.get("name", ""),
+                        "arguments": ""
+                    }
+                    continue
+                
+                # Handle argument deltas
+                elif event_type == "response.function_call_arguments.delta":
+                    output_index = chunk.output_index
+                    if output_index in accumulated_tool_calls:
+                        accumulated_tool_calls[output_index]["arguments"] += chunk.delta
+                    continue
+            
+            # Handle regular text content
+            if hasattr(chunk, "delta") and chunk.delta and hasattr(chunk.delta, "output_text"):
+                content = chunk.delta.output_text
                 accumulated_text += content
             
             # Create metadata on the first chunk
             if metadata is None:
                 metadata = ResponseMetadata(
-                    model=chunk.model,
-                    provider="openai",
-                    request_id=chunk.id
+                    model=getattr(chunk, "model", "unknown"),
+                    provider="openai"
                 )
             
             # Check if this is the last chunk
-            finished = chunk.choices[0].finish_reason is not None
+            finished = hasattr(chunk, "done") and chunk.done
             
             yield StreamingResponse(
                 chunk=content,
                 finished=finished,
                 metadata=metadata if finished else None
             )
+    
+    async def agenerate(
+        self,
+        instructions: Optional[str],
+        messages: List[Message],
+        tools: Optional[List[Tool]] = None,
+        tool_choice: Optional[str] = "auto",
+        parallel_tool_calls: bool = False,
+        output_format: Optional[ResponseFormat] = None,
+        timeout: Optional[int] = None,
+        stream: bool = False,
+        reasoning: Optional[ReasoningConfig] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        **kwargs
+    ) -> Union[GenerateResponse, AsyncGenerator[StreamingResponse, None]]:
+        """
+        Asynchronously generate a response from OpenAI
+        
+        Args:
+            instructions: System instructions for the model
+            messages: List of messages in the conversation
+            tools: List of tools available to the model
+            tool_choice: How the model should choose tools
+            parallel_tool_calls: Whether to allow parallel tool calls
+            output_format: Format specification for the output
+            timeout: Request timeout in seconds
+            stream: Whether to stream the response
+            reasoning: Configuration for model reasoning
+            metadata: Additional metadata for tracing and logging
+            **kwargs: Additional OpenAI-specific parameters
+            
+        Returns:
+            Either a complete response or an async streaming response generator
+        """
+        try:
+            # Validate output format
+            if output_format:
+                self._validate_output_format(output_format)
+            
+            # Convert messages to API format
+            api_messages = self._convert_messages_to_api_format(instructions, messages)
+            
+            # Prepare the request parameters
+            request_params = {
+                "model": self.model,
+                "input": api_messages,
+                "timeout": timeout,
+                "stream": stream,
+            }
+            
+            # Add tools if provided
+            if tools:
+                request_params["tools"] = self._convert_tools_to_api_format(tools)
+                if tool_choice != "auto":
+                    request_params["tool_choice"] = tool_choice
+                
+                # Add parallel tool calls parameter if needed
+                if parallel_tool_calls:
+                    request_params["parallel_tool_calls"] = True
+            
+            # Add structured output format if specified
+            if output_format:
+                response_format = self._convert_output_format_to_api_format(output_format)
+                if response_format:
+                    if "schema" in response_format and response_format["type"] == "json_schema":
+                        # Use the new format structure for text param in newer models
+                        request_params["text"] = {"format": response_format}
+                    else:
+                        # Use the older response_format param for backward compatibility
+                        request_params["response_format"] = response_format
+            
+            # Add reasoning configuration if specified
+            if reasoning:
+                request_params["reasoning"] = {}
+                
+                if hasattr(reasoning, "effort") and reasoning.effort:
+                    request_params["reasoning"]["effort"] = reasoning.effort.value
+                
+                if hasattr(reasoning, "summary") and reasoning.summary:
+                    request_params["reasoning"]["summary"] = reasoning.summary.value
+                
+                if hasattr(reasoning, "max_tokens") and reasoning.max_tokens:
+                    request_params["reasoning"]["max_tokens"] = reasoning.max_tokens
+            
+            # Add additional parameters
+            request_params.update(kwargs)
+            
+            # Make the API call
+            if stream:
+                response_stream = await self.async_client.responses.streaming.create(**request_params)
+                return self._acreate_streaming_response(response_stream)
+            else:
+                response = await self.async_client.responses.create(**request_params)
+                return self._create_response_from_api(response)
+            
+        except OpenAIError as e:
+            # Map OpenAI errors to LLMHub exceptions
+            error_msg = str(e)
+            
+            if "authentication" in error_msg.lower() or "api key" in error_msg.lower():
+                raise AuthenticationError(error_msg, provider=self.provider_name)
+            
+            elif "rate limit" in error_msg.lower():
+                raise RateLimitError(error_msg, provider=self.provider_name)
+            
+            elif "timeout" in error_msg.lower():
+                raise TimeoutError(error_msg, provider=self.provider_name)
+            
+            elif "context length" in error_msg.lower() or "token" in error_msg.lower():
+                raise TokenLimitError(error_msg, provider=self.provider_name)
+            
+            else:
+                raise ProviderError(error_msg, provider=self.provider_name)
+        
+        except Exception as e:
+            # Handle other errors
+            raise LLMHubError(f"Unexpected error: {str(e)}", provider=self.provider_name)
     
     def get_available_models(self) -> List[Dict[str, Any]]:
         """
@@ -765,35 +905,7 @@ class OpenAIProvider(BaseProvider):
                 f"Model '{model}' does not support function calling",
                 provider=self.provider_name
             )
-        
-        # Validate reasoning config (OpenAI doesn't support explicit reasoning)
-        if request.reasoning:
-            raise LLMHubError(
-                f"Model '{model}' does not support explicit reasoning configuration",
-                provider=self.provider_name
-            )
             
-        # Validate JSON response format requirements
-        if request.output_format and request.output_format.type == "json_object":
-            has_json_mention = False
-            for message in request.messages:
-                if not hasattr(message, "content") or message.content is None:
-                    continue
-                    
-                if isinstance(message.content, str) and "json" in message.content.lower():
-                    has_json_mention = True
-                    break
-                    
-                if isinstance(message.content, list):
-                    for content in message.content:
-                        if hasattr(content, "text") and content.text and "json" in content.text.lower():
-                            has_json_mention = True
-                            break
-                    if has_json_mention:
-                        break
-            
-            if not has_json_mention:
-                raise LLMHubError(
-                    "When using JSON response format, one of the messages must contain the word 'json'",
-                    provider=self.provider_name
-                )
+        # Validate structured output format if present
+        if request.output_format:
+            self._validate_output_format(request.output_format)

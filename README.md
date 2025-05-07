@@ -1,6 +1,6 @@
 # LLM Hub
 
-A unified Python interface for major Large Language Model providers (OpenAI, Claude, Gemini, and LiteLLM) with advanced features like tracing, cost tracking, retries, and structured output.
+A unified Python interface for major Large Language Model providers (OpenAI, Claude, Gemini) with advanced features like tracing, cost tracking, retries, and structured output.
 
 ## Features
 
@@ -15,7 +15,7 @@ A unified Python interface for major Large Language Model providers (OpenAI, Cla
 - **Tool Use/Function Calling** for agentic capabilities
 - **Vision Model Support** for processing images and documents
 - **Document Uploading** (where supported by model/provider)
-- **Thinking Steps** (intermediate reasoning, if supported)
+- **Reasoning Steps** (explicit reasoning)
 - **Streaming Responses** (where supported)
 - **Structured Output** (JSON, pydantic models)
 - **Prompt Caching** 
@@ -23,7 +23,7 @@ A unified Python interface for major Large Language Model providers (OpenAI, Cla
 ## Installation
 
 ```bash
-pip install llm_hub
+pip install nexla-llm-hub
 ```
 
 ## Quick Start
@@ -32,6 +32,7 @@ pip install llm_hub
 
 ```python
 from llm_hub import LLMHub
+from llm_hub.core.types import Message, MessageContent, ContentType, Role
 
 # Initialize with your preferred provider
 llm = LLMHub(
@@ -46,15 +47,15 @@ llm = LLMHub(
 response = llm.generate(
     instructions="You are a helpful assistant.",
     messages=[
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Tell me about the history of artificial intelligence."
-                }
+        Message(
+            role=Role.USER,
+            content=[
+                MessageContent(
+                    type=ContentType.TEXT,
+                    text="Tell me about the history of artificial intelligence."
+                )
             ]
-        }
+        )
     ]
 )
 
@@ -72,7 +73,7 @@ print(f"Cost: ${cost.total_cost:.6f} (${cost.prompt_cost:.6f} prompt, ${cost.com
 
 ```python
 from llm_hub import LLMHub
-from llm_hub.core.types import TextContent, ImageContent, Message, Role
+from llm_hub.core.types import Message, MessageContent, ContentType, Role
 
 # Initialize LLM Hub
 llm = LLMHub(provider="openai", api_key="sk-...", model="gpt-4o")
@@ -83,12 +84,12 @@ response = llm.generate(
         Message(
             role=Role.USER,
             content=[
-                TextContent(
-                    type="text",
+                MessageContent(
+                    type=ContentType.TEXT,
                     text="What can you tell me about this image?"
                 ),
-                ImageContent(
-                    type="image",
+                MessageContent(
+                    type=ContentType.IMAGE,
                     image_url="https://example.com/image.jpg",
                     detail="high"
                 )
@@ -100,18 +101,75 @@ response = llm.generate(
 print(response.message.content)
 ```
 
+### PDF Analysis Example
+
+```python
+from llm_hub import LLMHub
+from llm_hub.core.types import Message, MessageContent, ContentType, Role
+
+# Initialize LLM Hub
+llm = LLMHub(provider="openai", api_key="sk-...", model="gpt-4o")
+
+# Generate a response with PDF input
+response = llm.generate(
+    messages=[
+        Message(
+            role=Role.USER,
+            content=[
+                MessageContent(
+                    type=ContentType.TEXT,
+                    text="Summarize this document for me."
+                ),
+                MessageContent(
+                    type=ContentType.FILE,
+                    file_path="path/to/document.pdf"
+                )
+            ]
+        )
+    ]
+)
+
+print(response.message.content)
+```
+
+### Reasoning Example
+
+```python
+from llm_hub import LLMHub
+from llm_hub.core.types import Message, ReasoningConfig
+
+# Initialize LLM Hub
+llm = LLMHub(provider="openai", api_key="sk-...", model="gpt-4o")
+
+# Generate a response with reasoning enabled
+response = llm.generate(
+    messages=[
+        Message(
+            role="user",
+            content="Solve this math problem step by step: If a company's revenue grew by 15% to $230,000, what was the original revenue?"
+        )
+    ],
+    reasoning=ReasoningConfig(
+        type="default",
+        effort="high"
+    )
+)
+
+print(response.message.content)
+```
+
 ### Function Calling Example
 
 ```python
 from llm_hub import LLMHub
-from llm_hub.core.types import FunctionTool
+from llm_hub.core.types import Tool
 import json
 
 # Initialize LLM Hub
 llm = LLMHub(provider="openai", api_key="sk-...", model="gpt-4o")
 
 # Define a tool (function)
-weather_tool = FunctionTool(
+weather_tool = Tool(
     type="function",
     function={
         "name": "get_current_weather",
@@ -139,16 +197,10 @@ response = llm.generate(
     messages=[
         {
             "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's the weather like in San Francisco?"
-                }
-            ]
+            "content": "What's the weather like in San Francisco?"
         }
     ],
-    tools=[weather_tool],
-    tool_choice="auto"
+    tools=[weather_tool]
 )
 
 # Check if the model called a function
@@ -171,12 +223,7 @@ if response.message.tool_calls:
             messages=[
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "What's the weather like in San Francisco?"
-                        }
-                    ]
+                    "content": "What's the weather like in San Francisco?"
                 },
                 {
                     "role": "assistant", 
@@ -237,69 +284,51 @@ for chunk in stream:
 
 ```python
 from llm_hub import LLMHub
-from llm_hub.core.types import ResponseFormat
-from llm_hub.tools.structured_output import parse_response_as_model
-from pydantic import BaseModel
-from typing import List, Optional
+from llm_hub.core.types import ResponseFormat, ResponseFormatType
 
 # Initialize LLM Hub
 llm = LLMHub(provider="openai", api_key="sk-...", model="gpt-4o")
 
-# Define a Pydantic model for the output
-class Ingredient(BaseModel):
-    item: str
-    quantity: str
-    state: Optional[str] = None
-    
-class Recipe(BaseModel):
-    name: str
-    ingredients: List[Ingredient]
-    instructions: List[str]
-    servings: Optional[str] = None
-    prep_time_minutes: Optional[int] = None
+# Define a JSON schema for structured output
+event_schema = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "date": {"type": "string"},
+        "participants": {
+            "type": "array",
+            "items": {"type": "string"}
+        }
+    },
+    "required": ["name", "date", "participants"],
+    "additionalProperties": False
+}
 
-class RecipeResponse(BaseModel):
-    recipe: Recipe
-
-# Create a JSON schema for the model
+# Create an output format object
 output_format = ResponseFormat(
-    type="json_object",
-    schema=RecipeResponse.model_json_schema()
+    type=ResponseFormatType.JSON_SCHEMA,
+    schema=event_schema,
+    name="calendar_event", 
+    strict=True
 )
 
-# Generate a structured response
+# Generate a response with structured output
 response = llm.generate(
+    instructions="Extract the event information from the user's message.",
     messages=[
         {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Give me a recipe for chocolate chip cookies. Format your response as JSON."
-                }
-            ]
+            "role": "user", 
+            "content": "Alice and Bob are going to a science fair on Friday."
         }
     ],
     output_format=output_format
 )
 
-# Parse the response into the Pydantic model
-recipe_response = parse_response_as_model(response.message.content, RecipeResponse)
-recipe = recipe_response.recipe
-
-# Print the structured data
-print(f"Recipe: {recipe.name}")
-print(f"Prep time: {recipe.prep_time_minutes} minutes")
-print(f"Servings: {recipe.servings}")
-print("Ingredients:")
-for ingredient in recipe.ingredients:
-    ingredient_str = f"- {ingredient.quantity} {ingredient.item}"
-    if ingredient.state:
-        ingredient_str += f" ({ingredient.state})"
-    print(ingredient_str)
-print("Instructions:")
-for i, step in enumerate(recipe.instructions, 1):
-    print(f"{i}. {step}")
+# The response will be valid JSON matching your schema
+import json
+event_data = json.loads(response.message.content)
+print(f"Event: {event_data['name']} on {event_data['date']}")
+print(f"Participants: {', '.join(event_data['participants'])}")
 ```
 
 ### Error Handling Example
@@ -457,4 +486,4 @@ for chunk in stream:
 - **OpenAI** (GPT models) - Supports tool calling, vision, and structured output
 - **Claude** (via Anthropic) - Supports tool use with Claude 3.5, vision capabilities, and structured output
 - **Gemini** (Google) - Supports multimodal capabilities
-- **LiteLLM** (for access to 100+ additional LLMs)
+

@@ -11,10 +11,12 @@ from ..core.types import (
     StreamingResponse,
     ToolCall,
     ResponseFormat,
+    ResponseFormatType,
     Tool,
     ReasoningConfig,
     Message
 )
+from ..core.exceptions import LLMHubError, ConfigurationError
 
 
 class BaseProvider(abc.ABC):
@@ -24,6 +26,9 @@ class BaseProvider(abc.ABC):
     All provider implementations must inherit from this class and implement
     the required methods.
     """
+    
+    # Every provider should define this with supported model names
+    STRUCTURED_OUTPUT_MODELS = []
     
     def __init__(self, api_key: str, **kwargs):
         """
@@ -107,6 +112,68 @@ class BaseProvider(abc.ABC):
             Either a complete response or an async streaming response generator
         """
         pass
+    
+    def _validate_structured_output_request(self, model: str, output_format: Optional[ResponseFormat]) -> None:
+        """
+        Validate if a structured output request is valid for the given model
+        
+        Args:
+            model: The model name
+            output_format: The output format specification
+            
+        Raises:
+            ConfigurationError: If the model does not support structured outputs
+        """
+        if not output_format:
+            return
+            
+        # Check for JSON schema support
+        if output_format.type == ResponseFormatType.JSON_SCHEMA:
+            if not self.STRUCTURED_OUTPUT_MODELS or model not in self.STRUCTURED_OUTPUT_MODELS:
+                supported_models = ', '.join(self.STRUCTURED_OUTPUT_MODELS) if self.STRUCTURED_OUTPUT_MODELS else 'None'
+                raise ConfigurationError(
+                    f"Model '{model}' does not support structured outputs with JSON schema. "
+                    f"Supported models for {self.provider_name}: {supported_models}"
+                )
+            
+            # Validate schema requirements
+            if not output_format.schema:
+                raise ConfigurationError("JSON schema is required for structured outputs")
+                
+            schema = output_format.schema
+            
+            # Schema must be an object
+            if schema.get("type") != "object":
+                raise ConfigurationError("JSON schema root must be an object type")
+                
+            # Check for required fields
+            if "required" not in schema:
+                raise ConfigurationError("JSON schema must specify required fields")
+                
+            # Check for additionalProperties: false
+            if schema.get("additionalProperties") is not False:
+                raise ConfigurationError("JSON schema must set additionalProperties to false")
+    
+    def _validate_output_format(self, output_format: Optional[ResponseFormat]) -> None:
+        """
+        Validate the output format specification
+        
+        Args:
+            output_format: The output format specification
+            
+        Raises:
+            ConfigurationError: If the output format is invalid
+        """
+        if not output_format:
+            return
+            
+        # Validate output format type
+        if not hasattr(output_format, "type") or not output_format.type:
+            raise ConfigurationError("Output format must specify a type")
+            
+        # If it's a JSON schema, validate the schema
+        if output_format.type == ResponseFormatType.JSON_SCHEMA:
+            self._validate_structured_output_request(getattr(self, "model", ""), output_format)
     
     @abc.abstractmethod
     def get_available_models(self) -> List[Dict[str, Any]]:

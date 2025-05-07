@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Type, Union
 from pydantic import BaseModel, ValidationError
 
 from ..core.exceptions import StructuredOutputError
+from ..core.types import ResponseFormat, ResponseFormatType
+from ..core.exceptions import LLMHubError
 
 
 def extract_json_from_text(text: str) -> Dict[str, Any]:
@@ -54,44 +56,35 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
     raise StructuredOutputError("Could not extract valid JSON from the response")
 
 
-def parse_response_as_model(
-    response_text: str, 
-    model_class: Type[BaseModel]
-) -> BaseModel:
+def parse_response_as_model(response_text: str, model_class: Type[BaseModel]) -> BaseModel:
     """
-    Parse a text response as a Pydantic model
+    Parse a model response into a Pydantic model
     
     Args:
-        response_text: Text response from the LLM
-        model_class: Pydantic model class to parse into
+        response_text: The text response from the model
+        model_class: The Pydantic model class to parse into
         
     Returns:
-        Instantiated Pydantic model
+        An instance of the provided model class
         
     Raises:
-        StructuredOutputError: If the response can't be parsed into the model
+        LLMHubError: If the response cannot be parsed into the model
     """
     try:
-        # First try to extract JSON from the response
-        data = extract_json_from_text(response_text)
+        # Try to parse the response as JSON
+        json_data = json.loads(response_text)
         
-        # Then validate it against the model
-        # Try both Pydantic v1 and v2 methods for compatibility
-        try:
-            # Pydantic v2 method
-            return model_class.model_validate(data)
-        except AttributeError:
-            try:
-                # Pydantic v1 method
-                return model_class.parse_obj(data)
-            except AttributeError:
-                # Last resort: direct initialization
-                return model_class(**data)
+        # Try to validate using the model
+        return model_class.model_validate(json_data)
     
-    except (StructuredOutputError, ValidationError) as e:
-        raise StructuredOutputError(
-            f"Failed to parse response as {model_class.__name__}: {str(e)}"
-        )
+    except json.JSONDecodeError as e:
+        raise LLMHubError(f"Failed to parse response as JSON: {str(e)}")
+    
+    except ValidationError as e:
+        raise LLMHubError(f"Response does not match expected schema: {str(e)}")
+    
+    except Exception as e:
+        raise LLMHubError(f"Unexpected error parsing response: {str(e)}")
 
 
 def parse_response_as_list(response_text: str) -> List[Any]:
@@ -240,3 +233,105 @@ def convert_pydantic_to_json_schema(model_class: Type[BaseModel]) -> Dict[str, A
         result["required"] = schema["required"]
     
     return result
+
+
+def model_to_response_format(
+    model_class: Type[BaseModel], 
+    name: Optional[str] = None,
+    strict: bool = True
+) -> ResponseFormat:
+    """
+    Convert a Pydantic model to a ResponseFormat for use with LLM Hub
+    
+    Args:
+        model_class: The Pydantic model class to convert
+        name: Optional name for the schema (for documentation)
+        strict: Whether to enforce strict schema validation
+        
+    Returns:
+        A ResponseFormat object ready to use with generate methods
+    """
+    # Get the JSON schema for the model
+    schema = model_class.model_json_schema()
+    
+    # Create a ResponseFormat object
+    return ResponseFormat(
+        type=ResponseFormatType.JSON_SCHEMA,
+        schema=schema,
+        name=name or model_class.__name__,
+        strict=strict
+    )
+
+
+def create_schema_from_dict(schema_dict: Dict[str, Any], name: Optional[str] = None) -> ResponseFormat:
+    """
+    Create a ResponseFormat from a dictionary representing a JSON schema
+    
+    Args:
+        schema_dict: Dictionary containing the JSON schema
+        name: Optional name for the schema
+        
+    Returns:
+        A ResponseFormat object ready to use with generate methods
+        
+    Raises:
+        LLMHubError: If the schema is invalid
+    """
+    # Validate basic schema requirements
+    if not isinstance(schema_dict, dict):
+        raise LLMHubError("Schema must be a dictionary")
+    
+    if schema_dict.get("type") != "object":
+        raise LLMHubError("Schema root must be an object type")
+    
+    if "required" not in schema_dict:
+        raise LLMHubError("Schema must specify required fields")
+    
+    if "properties" not in schema_dict:
+        raise LLMHubError("Schema must define properties")
+    
+    # Set additionalProperties to false if not specified
+    if "additionalProperties" not in schema_dict:
+        schema_dict["additionalProperties"] = False
+    
+    # Create and return the ResponseFormat
+    return ResponseFormat(
+        type=ResponseFormatType.JSON_SCHEMA,
+        schema=schema_dict,
+        name=name,
+        strict=True
+    )
+
+
+def is_refusal_response(response_text: str) -> bool:
+    """
+    Check if a response appears to be a refusal from the model
+    
+    Args:
+        response_text: The text response from the model
+        
+    Returns:
+        Boolean indicating if this is likely a refusal
+    """
+    # Check if response is valid JSON
+    try:
+        json_data = json.loads(response_text)
+        # If it parses as JSON, it's not a refusal
+        return False
+    except json.JSONDecodeError:
+        # Not valid JSON, might be a refusal
+        pass
+    
+    # Common refusal patterns
+    refusal_patterns = [
+        "I'm sorry",
+        "I cannot",
+        "I am not able",
+        "I apologize",
+        "I'm unable",
+        "I don't have",
+        "I'm not able",
+    ]
+    
+    text_lower = response_text.lower()
+    return any(pattern.lower() in text_lower for pattern in refusal_patterns)

@@ -90,6 +90,8 @@ class Role(str, Enum):
 class Message(BaseModel):
     role: Role
     content: List[Union[TextContent, ImageContent, DocumentContent, AudioContent]] | str
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
 
 class ToolType(str, Enum):
     FUNCTION = "function"
@@ -128,8 +130,15 @@ class ReasoningEffort(str, Enum):
     HIGH = "high"
 
 
+class SummaryType(str, Enum):
+    AUTO = "auto"
+    DETAILED = "detailed"
+    NONE = "none"
+
+
 class ReasoningConfig(BaseModel):
-    effort: ReasoningEffort = ReasoningEffort.MEDIUM
+    effort: Optional[ReasoningEffort] = ReasoningEffort.MEDIUM
+    summary: Optional[SummaryType] = SummaryType.AUTO
     max_tokens: Optional[int] = None
 
 
@@ -139,9 +148,18 @@ class Provider(str, Enum):
     GEMINI = "gemini"
 
 
+class ResponseFormatType(str, Enum):
+    JSON_OBJECT = "json_object"
+    JSON_SCHEMA = "json_schema"
+    TEXT = "text"
+
+
 class ResponseFormat(BaseModel):
-    type: Optional[str] = None
+    type: ResponseFormatType
     schema: Optional[Dict[str, Any]] = None
+    name: Optional[str] = None  # Name for the schema, useful for documentation
+    strict: bool = True  # Whether to strictly enforce schema validation
+    description: Optional[str] = None  # Optional description for the schema
     model: Optional[Any] = None  # Pydantic model
 
 

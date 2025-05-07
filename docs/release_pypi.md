@@ -1,6 +1,6 @@
 # Releasing to PyPI and TestPyPI
 
-This document outlines the process for releasing the `llm_hub` package to both TestPyPI and PyPI.
+This document outlines the process for releasing the `nexla-llm-hub` package to both TestPyPI and PyPI.
 
 ## Prerequisites
 
@@ -66,7 +66,7 @@ python -m twine upload --repository testpypi dist/*
 ### 5. Test the TestPyPI Installation
 
 ```bash
-pip install --index-url https://test.pypi.org/simple/ --no-deps llm_hub
+pip install --index-url https://test.pypi.org/simple/ --no-deps nexla-llm-hub
 ```
 
 Verify the installation works as expected by running some basic tests:
@@ -87,7 +87,7 @@ python -m twine upload dist/*
 ### 7. Verify Production Installation
 
 ```bash
-pip install llm_hub
+pip install nexla-llm-hub
 ```
 
 Test the production installation to ensure it works properly.
