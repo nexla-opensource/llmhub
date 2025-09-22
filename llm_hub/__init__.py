@@ -1,45 +1,26 @@
-"""
-LLM Hub - A unified interface for major LLM providers
-"""
-
-__version__ = "0.1.0"
-
-from .core.hub import LLMHub
-from .core.types import (
-    TextContent,
-    ImageContent,
-    DocumentContent,
-    AudioContent,
-    Message,
-    ResponseFormat,
-    Tool,
-    FunctionTool,
-    ReasoningConfig,
-)
-from .core.exceptions import (
-    LLMHubError,
-    ProviderError,
-    RateLimitError,
-    TimeoutError,
-    TokenLimitError,
-    AuthenticationError,
-)
+from .client import LLMHub
+from .client_sync import LLMHubSync
+from .config import HubConfig, ProviderConfig, OpenAIConfig, AnthropicConfig, GeminiConfig, Pricing
+from .types import Message, Role, InputMedia, ToolSpec, StructuredSchema
+from .exceptions import LLMHubError, ProviderNotAvailable, FeatureNotSupported
+from .usage import UsageTotals
 
 __all__ = [
     "LLMHub",
-    "TextContent",
-    "ImageContent",
-    "DocumentContent",
-    "AudioContent",
+    "LLMHubSync",
+    "HubConfig",
+    "ProviderConfig",
+    "OpenAIConfig",
+    "AnthropicConfig",
+    "GeminiConfig",
+    "Pricing",
     "Message",
-    "ResponseFormat",
-    "Tool",
-    "FunctionTool",
-    "ReasoningConfig",
+    "Role",
+    "InputMedia",
+    "ToolSpec",
+    "StructuredSchema",
     "LLMHubError",
-    "ProviderError",
-    "RateLimitError",
-    "TimeoutError",
-    "TokenLimitError",
-    "AuthenticationError",
+    "ProviderNotAvailable",
+    "FeatureNotSupported",
+    "UsageTotals",
 ]
